@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shell Shockers Parkour Mod
 // @namespace    https://github.com/novaa1351/ss-parkour-mod
-// @version      2.1.0
+// @version      2.2.0
 // @description  Runs private games entirely client-side (no game server) – lag-free parkour with a tick-accurate run timer.
 // @match        https://shellshock.io/*
 // @match        https://shellgame.me/*
@@ -49,17 +49,23 @@
  *
  * Splits
  * ------
- * A LiveSplit-style panel (right side) shows each segment's split, the delta
- * vs your PB (green ahead / red behind, gold = best segment ever) and Sum of
- * Best. Checkpoints are per-map planes in ROUTES (Parkour Easy: one per lane
- * wall), crossed in order and interpolated within the tick like the finish.
- * PB, best segments and attempt counts are saved per map in localStorage.
- * Runs from a practice spawn (F7) are labelled PRACTICE and never saved.
+ * A LiveSplit-style panel (top left, under the timer) shows each segment's split,
+ * the delta vs your PB (green ahead / red behind, gold = best segment ever) and
+ * Sum of Best. Checkpoints are per-map zones in ROUTES – lane walls on Easy,
+ * floors on Medium, the Blue Wizard coins on Hard – interpolated within the tick
+ * like the finish. PB, best segments and attempts are saved per map in
+ * localStorage. Runs from a practice spawn (F7) are labelled PRACTICE, never saved.
  *
- * Offline hotkeys (in game):
- *   F6  – restart the run from the map's real start (leaves practice)
- *   F7  – set a practice spawn where you're standing
- *   F8  – restart the run from the current spawn
+ * Spawn facing
+ * ------------
+ * The engine randomizes yaw on every respawn; on the parkour maps you now spawn
+ * facing the start of the course (practice spawns keep the facing you set them with).
+ *
+ * Controls (in game):
+ *   Reset Run – back to the spawn with a fresh run, no pause. Default Backspace;
+ *               rebind it in Settings → Keybindings.
+ *   F6  – back to the map's real start (leaves practice)
+ *   F7  – set a practice spawn where you're standing, facing where you're looking
  *   F9  – show / hide the splits panel
  */
 
@@ -76,18 +82,49 @@
     const EGG = { half: 0.25, height: 0.6 }; // OC.playerCollisionMesh: box size .5, height .6, from the feet
     const PREF_SPLITS = 'ssoShowSplits';
     const STORE_PREFIX = 'ssoSplits:';
+    const RESET_ID = 'ssoReset';
+    const RESET_LOC = 'sso_keybind_reset';
+    const RESET_LABEL = 'Reset Run';
+    const PREF_RESET_KEY = 'ssoResetKey';
+    const DEFAULT_RESET_KEY = { code: 'Backspace', label: 'BACKSPACE' };
 
-    // Split routes, keyed by map filename. Each split fires when the egg's feet
-    // cross `at` going +axis (0=x, 1=y, 2=z); the last segment ends at the finish.
-    // Maps without a route get a single "Finish" segment.
+    // Split routes, keyed by map filename. Each split ends when the egg crosses its
+    // zone: { plane: [axis, at] } – feet pass `at` going +axis (0=x, 1=y, 2=z) – or
+    // { cell: [x, y, z] } – any part of the egg touches that block. The last
+    // segment ends at the finish. `face` is the spawn yaw (0 = facing −z, π/2 = −x).
+    // Maps without a route get one "Finish" segment and the engine's random facing.
     const ROUTES = {
         // Parkour - Easy: nine lanes along x, separated by blue walls at
-        // z = 3, 8, 12, 16, 20, 24, 28, 32. A split is the far face of each wall.
+        // z = 3, 8, 12, 16, 20, 24, 28, 32; a split is the far face of each wall.
+        // Both spawns are at x = 16 and the course starts west, up the stairs at x = 12–13.
         parkour1: {
-            axis: 2,
-            splits: [['Blocks', 4], ['Boxes', 9], ['Invis', 13], ['Bouncers', 17],
-                ['Walls', 21], ['Ladders', 25], ['Crates', 29], ['Triple', 33]],
+            face: Math.PI / 2,
+            splits: [
+                ['Blocks', { plane: [2, 4] }], ['Boxes', { plane: [2, 9] }],
+                ['Invis', { plane: [2, 13] }], ['Bouncers', { plane: [2, 17] }],
+                ['Walls', { plane: [2, 21] }], ['Ladders', { plane: [2, 25] }],
+                ['Crates', { plane: [2, 29] }], ['Triple', { plane: [2, 33] }],
+            ],
             last: 'End',
+        },
+        // Parkour - Medium: a tower with floor slabs at y = 4, 9, 12, 18, 22, 27; a
+        // split is getting up onto the next slab. Spawns face the x = 6–7 corridor
+        // (a wall at x = 5 blocks the other way).
+        parkour2: {
+            face: 0,
+            splits: [
+                ['Lucky Block', { plane: [1, 5] }], ['Aztec', { plane: [1, 10] }],
+                ['Castle', { plane: [1, 13] }], ['Boxes', { plane: [1, 19] }],
+                ['Crates', { plane: [1, 23] }], ['Ladders', { plane: [1, 28] }],
+            ],
+            last: 'End',
+        },
+        // Parkour - Hard: splits at the two Blue Wizard coins (scavenger.coin) on the
+        // ground; the finish is the spatula. Spawns face the crate staircase (−z).
+        parkour3: {
+            face: 0,
+            splits: [['no-clip', { cell: [3, 3, 0] }], ['Neo', { cell: [7, 3, 6] }]],
+            last: 'shroom',
         },
     };
 
@@ -101,8 +138,10 @@
         #teamScores, #chw-home, #chw-game-screen { display: none !important; }
 
         /* LiveSplit-style splits panel. */
+        /* Top left, under the timer – where the player-list dropdown sits online.
+           Hidden while the pause menu (which uses that corner) is open. */
         #ssoSplits {
-            position: fixed; right: 12px; top: 180px; width: 270px; z-index: 50;
+            position: fixed; left: 15px; top: 52px; width: 270px; z-index: 50;
             background: linear-gradient(#2b2b2b, #0d0d0d); color: #fff;
             font: 600 15px/1.25 Nunito, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums;
             border-radius: 6px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,.45);
@@ -123,6 +162,7 @@
         #ssoSplits .sso-foot { display: flex; justify-content: space-between; padding: 3px 10px; border-top: 1px solid #333; font-size: 14px; }
         #ssoSplits .sso-small { font-size: 11px; color: #888; }
         #ssoSplits .sso-reset { pointer-events: auto; cursor: pointer; text-decoration: underline; }
+        body:has(.is-paused) #ssoSplits { display: none !important; }
     `;
     const params = new URLSearchParams(location.search);
     const IS_OFFLINE_PAGE = params.has('testMap') && params.has('sso');
@@ -170,10 +210,20 @@
     function installSettingsToggle() {
         whenReady(() => window.extern && typeof extern.applyUiSettings === 'function' && window.vueData && vueData.settingsUi, () => {
             const ensure = () => {
-                if (vueData.loc && vueData.loc[SETTING_LOC] !== SETTING_LABEL) vueData.loc[SETTING_LOC] = SETTING_LABEL;
-                const misc = vueData.settingsUi && vueData.settingsUi.togglers && vueData.settingsUi.togglers.misc;
+                const loc = vueData.loc;
+                if (loc && loc[SETTING_LOC] !== SETTING_LABEL) loc[SETTING_LOC] = SETTING_LABEL;
+                if (loc && loc[RESET_LOC] !== RESET_LABEL) loc[RESET_LOC] = RESET_LABEL;
+                const ui = vueData.settingsUi;
+                const misc = ui && ui.togglers && ui.togglers.misc;
                 if (misc && !misc.some(e => e.id === SETTING_ID)) {
                     misc.push({ id: SETTING_ID, locKey: SETTING_LOC, value: pref(PREF_ENABLED, true) });
+                }
+                // Settings → Keybindings renders controls.keyboard.game; capturing a key
+                // there unbinds it from anything else. The engine maps code → action and
+                // ignores actions it doesn't know, so the offline page handles this one.
+                const keys = ui && ui.controls && ui.controls.keyboard && ui.controls.keyboard.game;
+                if (keys && !keys.some(e => e.id === RESET_ID)) {
+                    keys.push({ id: RESET_ID, side: 'left', locKey: RESET_LOC, value: resetKey() });
                 }
             };
             ensure();
@@ -185,9 +235,20 @@
                 const entry = settingsUi && settingsUi.togglers && settingsUi.togglers.misc &&
                     settingsUi.togglers.misc.find(e => e.id === SETTING_ID);
                 if (entry) setPref(PREF_ENABLED, !!entry.value);
+                const key = settingsUi && settingsUi.controls && settingsUi.controls.keyboard &&
+                    settingsUi.controls.keyboard.game.find(e => e.id === RESET_ID);
+                if (key) { try { localStorage.setItem(PREF_RESET_KEY, JSON.stringify(key.value || null)); } catch {} }
                 return origApply.apply(this, arguments);
             };
         });
+    }
+
+    // { code, label } or null when unbound.
+    function resetKey() {
+        try {
+            const v = localStorage.getItem(PREF_RESET_KEY);
+            return v === null ? DEFAULT_RESET_KEY : JSON.parse(v);
+        } catch { return DEFAULT_RESET_KEY; }
     }
 
     // ---------------------------------------------------------------- home page
@@ -264,6 +325,39 @@
             return origGetItem.call(this, key);
         };
 
+        // --- Spawn facing -----------------------------------------------------
+        // Mouse look lives in the WASM. The engine copies window.get_yaw_pitch() into
+        // the player every frame, and reset_yaw_pitch() (called on every respawn)
+        // picks a random yaw. Wrap both: after a reset, offset the yaw so the engine
+        // sees the facing we asked for; mouse movement then continues from there.
+        // (The loader assigns these globals later, which lands in the setters.)
+        const TAU = Math.PI * 2;
+        const look = { get: null, reset: null, offset: 0, pending: null };
+        function getYawPitch() {
+            const r = look.get.apply(this, arguments);
+            if (!look.offset) return r;
+            // Kept in [0, 2π): the ladder check does Math.round(yaw / 90°) % 4.
+            return { yaw: (((r.yaw + look.offset) % TAU) + TAU) % TAU, pitch: r.pitch, coords: r.coords };
+        }
+        function resetYawPitch() {
+            look.reset.apply(this, arguments);
+            look.offset = 0;
+            if (look.pending !== null) {
+                look.offset = look.pending - look.get().yaw;
+                look.pending = null;
+            }
+        }
+        Object.defineProperty(window, 'get_yaw_pitch', {
+            configurable: true,
+            get() { return look.get && getYawPitch; },
+            set(fn) { look.get = fn; },
+        });
+        Object.defineProperty(window, 'reset_yaw_pitch', {
+            configurable: true,
+            get() { return look.reset && resetYawPitch; },
+            set(fn) { look.reset = fn; },
+        });
+
         // --- 2. Patch the decrypted engine before it executes -----------------
         // The WASM loader decrypts js/shellshock.js and runs it by assigning
         // script.textContent, so intercept that one assignment.
@@ -288,8 +382,9 @@
             spawn: null,         // the engine's spawn object (lM); F7 edits it in place
             homeSpawn: null,     // the map's real start, for F6
             practice: false,     // spawned somewhere other than the real start
+            practiceYaw: null,   // facing captured with the practice spawn
             finish: undefined,   // computed lazily from the map JSON
-            route: undefined,    // { axis, splits: [[name, at]…], names: [...] }
+            route: undefined,    // { face, zones: [...], names: [...] }
             store: null,         // persisted PB / golds for this map
             run: null,           // { state: 'armed'|'running'|'finished', ticks, prev, time, splits, next, practice }
 
@@ -301,6 +396,8 @@
                 this.player = player;
                 this.spawn = spawn;
                 if (!this.homeSpawn) this.homeSpawn = { x: spawn.x, y: spawn.y, z: spawn.z };
+                this.setup();
+                look.pending = this.facing();
                 player.respawn(...this.spawnPos(spawn));
                 // The normal (server) respawn path clears the pause flag; test mode
                 // doesn't, which left Quit/Profile/Inventory/Shop drawn over the game.
@@ -329,6 +426,22 @@
                 });
             },
 
+            // Yaw to spawn with, or null for the engine's random one.
+            facing() {
+                if (this.practice) return this.practiceYaw;
+                return this.route && this.route.face !== undefined ? this.route.face : null;
+            },
+
+            // Reset key / F6: back to the spawn with a fresh run, no pause needed.
+            restart() {
+                const p = this.player, s = this.spawn;
+                if (!p || !s) return false;
+                look.pending = this.facing();
+                p.respawn(...this.spawnPos(s));
+                this.startRun();
+                return true;
+            },
+
             // ---- run timer & splits ----
 
             setup() {
@@ -338,17 +451,18 @@
                 try { mapName = JSON.parse(cache.mapBackup).name || file; } catch {}
                 const def = ROUTES[file];
                 this.route = def
-                    ? { axis: def.axis, splits: def.splits, names: [...def.splits.map(s => s[0]), def.last] }
-                    : { axis: 2, splits: [], names: ['Finish'] };
+                    ? { face: def.face, zones: def.splits.map(([, z]) => compileZone(z)), names: [...def.splits.map(s => s[0]), def.last] }
+                    : { zones: [], names: ['Finish'] };
                 this.mapName = mapName;
                 this.store = loadStore(file, this.route.names);
             },
 
             startRun() {
                 this.setup();
-                // Splits behind a practice spawn are skipped, not failed.
-                const s = this.spawn, ax = this.route.axis, start = s ? +[s.x, s.y, s.z][ax] + 0.5 : -Infinity;
-                const next = this.route.splits.filter(([, at]) => at <= start).length;
+                // Plane splits already behind a practice spawn are skipped up front.
+                const zones = this.route.zones, pos = this.spawn ? this.spawnPos(this.spawn) : null;
+                let next = 0;
+                while (pos && next < zones.length && zones[next].type === 'axis' && pos[zones[next].axis] >= zones[next].at) next++;
                 this.run = {
                     state: 'armed', ticks: 0, prev: null, time: 0,
                     splits: new Array(next).fill(null), next, practice: this.practice,
@@ -379,12 +493,15 @@
                 r.ticks++;
                 const at = t => (r.ticks - 1 + t) * TICK_MS;
 
-                // Checkpoints, in order (several can fall in one step).
-                const ax = this.route.axis;
-                while (r.next < this.route.splits.length) {
-                    const t = crossPlane(ax, this.route.splits[r.next][1], r.prev, cur);
-                    if (t === null) break;
+                // Checkpoints: the first remaining zone crossed this step counts, and any
+                // before it are recorded as skipped (several can fall in one step).
+                const zones = this.route.zones;
+                for (let n = r.next; n < zones.length;) {
+                    const t = crossing(zones[n], r.prev, cur);
+                    if (t === null) { n++; continue; }
+                    while (r.splits.length < n) r.splits.push(null);
                     this.recordSplit(at(t));
+                    n = r.next;
                 }
 
                 const f = this.finish && crossing(this.finish, r.prev, cur);
@@ -472,6 +589,12 @@
                 }
                 el.style.display = pref(PREF_SPLITS, true) ? '' : 'none';
                 if (el.style.display) return;
+                // Line up with the player-list dropdown, just below the timer row.
+                const timer = document.getElementById('shellStreakContainer');
+                const list = document.getElementById('playerList');
+                const tb = timer && timer.getBoundingClientRect(), lb = list && list.getBoundingClientRect();
+                if (tb && tb.height) el.style.top = Math.round(tb.bottom + 8) + 'px';
+                if (lb && lb.width) el.style.left = Math.round(lb.left) + 'px';
 
                 const r = this.run, st = this.store, names = this.route.names, pb = st.pb;
                 const cur = r && r.state !== 'finished' ? r.splits.length : -1;
@@ -525,10 +648,24 @@
             extern.leaveGame = () => location.assign(location.pathname);
         });
 
+        // The reset key (Settings → Keybindings → Reset Run) works mid-run, while the
+        // mouse is captured; a mouse button can be bound too ("MOUSE n").
+        const tryReset = code => {
+            const rk = resetKey();
+            if (!rk || rk.code !== code || !document.pointerLockElement) return false;
+            if (sso.restart()) toast(sso.practice ? 'Run restarted (practice spawn)' : 'Run restarted');
+            return true;
+        };
+        window.addEventListener('mousedown', e => {
+            if (tryReset('MOUSE ' + e.button)) { e.preventDefault(); e.stopPropagation(); }
+        }, true);
+
         window.addEventListener('keydown', e => {
-            if (e.repeat || !['F6', 'F7', 'F8', 'F9'].includes(e.key)) return;
+            if (e.repeat) return;
             const ae = document.activeElement;
             if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+            if (tryReset(e.code)) { e.preventDefault(); e.stopPropagation(); return; }
+            if (!['F6', 'F7', 'F9'].includes(e.key)) return;
             e.preventDefault();
             e.stopPropagation();
             if (e.key === 'F9') {
@@ -541,16 +678,16 @@
             if (e.key === 'F7') {
                 s.x = p[k[0]] - 0.5; s.y = p[k[1]] - SPAWN_LIFT; s.z = p[k[2]] - 0.5;
                 sso.practice = true;
-                toast('Practice spawn set here – F8 to use it, F6 for the real start');
+                sso.practiceYaw = +p.mY;   // engine field for yaw (set from get_yaw_pitch each frame)
+                const rk = resetKey();
+                toast(`Practice spawn set here – ${rk ? rk.label : 'Reset Run'} to use it, F6 for the real start`);
                 return;
             }
-            if (e.key === 'F6') {
-                Object.assign(s, sso.homeSpawn);
-                sso.practice = false;
-            }
-            p.respawn(...sso.spawnPos(s));
-            sso.startRun();
-            toast(e.key === 'F6' ? 'Back to the real start' : 'Run restarted');
+            // F6: back to the map's real start.
+            Object.assign(s, sso.homeSpawn);
+            sso.practice = false;
+            sso.restart();
+            toast('Back to the real start');
         }, true);
 
         console.log(TAG, `offline map: ${file}`);
@@ -576,10 +713,11 @@
         try { localStorage.setItem(STORE_PREFIX + file, JSON.stringify(st)); } catch {}
     }
 
-    // Fraction (0..1) along a→b at which `axis` passes `at` going positive, or null.
-    function crossPlane(axis, at, a, b) {
-        if (!(a[axis] < at && b[axis] >= at)) return null;
-        return (at - a[axis]) / (b[axis] - a[axis]);
+    // ROUTES zone → the shape crossing() understands.
+    function compileZone(z) {
+        if (z.plane) return { type: 'axis', axis: z.plane[0], at: z.plane[1] };
+        const [x, y, zz] = z.cell;   // touching the block = feet inside it grown by the egg's hitbox
+        return { type: 'box', min: [x - EGG.half, y - EGG.height, zz - EGG.half], max: [x + 1 + EGG.half, y + 1, zz + 1 + EGG.half] };
     }
 
     function fmtSplit(ms) {
@@ -647,6 +785,11 @@
 
     // Fraction (0..1) along the step a→b at which the finish is crossed, or null.
     function crossing(f, a, b) {
+        if (f.type === 'axis') {
+            // `axis` passes `at` going positive.
+            if (!(a[f.axis] < f.at && b[f.axis] >= f.at)) return null;
+            return (f.at - a[f.axis]) / (b[f.axis] - a[f.axis]);
+        }
         if (f.type === 'plane') {
             if (!(a[1] < f.y && b[1] >= f.y)) return null;
             const t = (f.y - a[1]) / (b[1] - a[1]);
