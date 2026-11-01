@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shell Shockers Parkour Mod
 // @namespace    https://github.com/novaa1351/ss-parkour-mod
-// @version      2.2.1
+// @version      2.3.0
 // @description  Runs private games entirely client-side (no game server) – lag-free parkour with a tick-accurate run timer.
 // @match        https://shellshock.io/*
 // @match        https://shellgame.me/*
@@ -66,6 +66,7 @@
  *               rebind it in Settings → Keybindings.
  *   F6  – back to the map's real start (leaves practice)
  *   F7  – set a practice spawn where you're standing, facing where you're looking
+ *   F8  – splits panel: compare against PB splits / best segments
  *   F9  – show / hide the splits panel
  */
 
@@ -81,6 +82,7 @@
     const TICK_MS = 1000 / 30;            // engine physics step (LR(): Zx += 33.333…)
     const EGG = { half: 0.25, height: 0.6 }; // OC.playerCollisionMesh: box size .5, height .6, from the feet
     const PREF_SPLITS = 'ssoShowSplits';
+    const PREF_BEST_VIEW = 'ssoBestView';   // panel compares against best segments instead of PB
     const STORE_PREFIX = 'ssoSplits:';
     const RESET_ID = 'ssoReset';
     const RESET_LOC = 'sso_keybind_reset';
@@ -151,6 +153,7 @@
         #ssoSplits .sso-head { display: flex; justify-content: space-between; padding: 6px 10px; background: #1a1a1a; font-size: 14px; }
         #ssoSplits .sso-title { font-weight: 800; }
         #ssoSplits .sso-att { color: #aaa; }
+        #ssoSplits .sso-mode { color: #d8af1f; font-size: 11px; letter-spacing: .04em; }
         #ssoSplits .sso-practice { padding: 3px 10px; background: #5a3d00; color: #ffd27a; font-size: 12px; }
         #ssoSplits .sso-row { display: grid; grid-template-columns: 1fr 72px 72px; padding: 3px 10px; border-top: 1px solid #1f1f1f; }
         #ssoSplits .sso-cur { background: linear-gradient(#3373f4, #153574); }
@@ -524,8 +527,11 @@
                 const prev = i === 0 ? 0 : r.splits[i - 1];
                 r.splits.push(time);
                 r.next = Math.max(r.next, i + 1);
-                if (r.practice || prev === null) return;   // segment not comparable
-                const seg = time - prev;
+                // For the best-segments view: this run's segment time, and the best it was up against.
+                const seg = prev === null ? null : time - prev;
+                (r.segs = r.segs || [])[i] = seg;
+                (r.prevBest = r.prevBest || [])[i] = st.best[i];
+                if (r.practice || seg === null) return;   // segment not comparable
                 if (st.best[i] === null || seg < st.best[i]) {
                     st.best[i] = seg;
                     r.golds = r.golds || {};
@@ -599,12 +605,31 @@
 
                 const r = this.run, st = this.store, names = this.route.names, pb = st.pb;
                 const cur = r && r.state !== 'finished' ? r.splits.length : -1;
+                const bestView = pref(PREF_BEST_VIEW, false);
                 const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
                 let rows = '';
                 names.forEach((name, i) => {
                     let delta = '', time = '', cls = '';
                     const done = r && i < r.splits.length;
-                    if (done) {
+                    if (bestView) {
+                        // Segment durations: this run's where done, otherwise your best.
+                        if (done) {
+                            const seg = r.segs ? r.segs[i] : null, was = r.prevBest ? r.prevBest[i] : null;
+                            time = seg === null || seg === undefined ? '-' : fmtSplit(seg);
+                            if (seg !== null && seg !== undefined && was !== null && was !== undefined) {
+                                delta = fmtDelta(seg - was);
+                                cls = seg < was ? 'gold' : 'behind-lose';
+                            }
+                            if (r.golds && r.golds[i]) cls = 'gold';
+                        } else {
+                            time = st.best[i] !== null ? fmtSplit(st.best[i]) : '-';
+                            const start = i === 0 ? 0 : r && r.splits[i - 1];
+                            if (i === cur && st.best[i] !== null && start !== null && start !== undefined && r.time - start > st.best[i]) {
+                                delta = fmtDelta(r.time - start - st.best[i]);
+                                cls = 'behind-lose';
+                            }
+                        }
+                    } else if (done) {
                         const t = r.splits[i];
                         time = t === null ? '-' : fmtSplit(t);
                         if (t !== null && pb && pb[i] !== null) {
@@ -628,12 +653,13 @@
                 });
                 const sob = st.best.every(b => b !== null) ? fmtSplit(st.best.reduce((a, b) => a + b, 0)) : '-';
                 el.innerHTML =
-                    `<div class="sso-head"><span class="sso-title">${esc(this.mapName)}</span><span class="sso-att">${st.attempts}</span></div>` +
+                    `<div class="sso-head"><span class="sso-title">${esc(this.mapName)}</span>` +
+                    `<span class="sso-att">${bestView ? '<span class="sso-mode">BEST SEGS</span> ' : ''}${st.attempts}</span></div>` +
                     (r && r.practice ? '<div class="sso-practice">PRACTICE – F6 for real start</div>' : '') +
                     rows +
                     `<div class="sso-foot"><span>Sum of Best</span><span>${sob}</span></div>` +
                     `<div class="sso-foot"><span>Personal Best</span><span>${pb ? fmtSplit(pb[pb.length - 1]) : '-'}</span></div>` +
-                    `<div class="sso-foot sso-small"><span>F9 hide · ${st.completed}/${st.attempts} finished</span><span class="sso-reset" title="Reset this map's splits">reset</span></div>`;
+                    `<div class="sso-foot sso-small"><span>F8 ${bestView ? 'PB' : 'best segs'} · F9 hide · ${st.completed}/${st.attempts} finished</span><span class="sso-reset" title="Reset this map's splits">reset</span></div>`;
             },
         };
 
@@ -666,12 +692,18 @@
             const ae = document.activeElement;
             if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
             if (tryReset(e.code)) { e.preventDefault(); e.stopPropagation(); return; }
-            if (!['F6', 'F7', 'F9'].includes(e.key)) return;
+            if (!['F6', 'F7', 'F8', 'F9'].includes(e.key)) return;
             e.preventDefault();
             e.stopPropagation();
             if (e.key === 'F9') {
                 setPref(PREF_SPLITS, !pref(PREF_SPLITS, true));
                 sso.renderSplits();
+                return;
+            }
+            if (e.key === 'F8') {
+                setPref(PREF_BEST_VIEW, !pref(PREF_BEST_VIEW, false));
+                sso.renderSplits();
+                toast(pref(PREF_BEST_VIEW, false) ? 'Splits: best segments' : 'Splits: PB');
                 return;
             }
             const p = sso.player, k = sso.posKeys, s = sso.spawn;
