@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shell Shockers Parkour Mod
 // @namespace    https://github.com/novaa1351/ss-parkour-mod
-// @version      2.2.0
+// @version      2.2.1
 // @description  Runs private games entirely client-side (no game server) – lag-free parkour with a tick-accurate run timer.
 // @match        https://shellshock.io/*
 // @match        https://shellgame.me/*
@@ -43,7 +43,7 @@
  * Replaces the best-streak counter. It counts physics ticks (30/s) from the
  * moment you click Play, so lag or FPS drops never change a time. The finish
  * is the top of the launch tube nearest the spatula (or touching the spatula
- * block on maps without one); the crossing is interpolated within the tick, so
+ * block on a map without one); the crossing is interpolated within the tick, so
  * finish times are accurate to the millisecond rather than to 33 ms.
  * Pausing (Esc / losing mouse capture) abandons the run; Play restarts it.
  *
@@ -120,7 +120,8 @@
             last: 'End',
         },
         // Parkour - Hard: splits at the two Blue Wizard coins (scavenger.coin) on the
-        // ground; the finish is the spatula. Spawns face the crate staircase (−z).
+        // ground; the finish is the tetris-ringed tube above the pad at (6, 6, 7).
+        // Spawns face the crate staircase (−z).
         parkour3: {
             face: 0,
             splits: [['no-clip', { cell: [3, 3, 0] }], ['Neo', { cell: [7, 3, 6] }]],
@@ -760,7 +761,9 @@
             [isSolid(x + 1, y, z), isSolid(x - 1, y, z), isSolid(x, y, z + 1), isSolid(x, y, z - 1)].filter(Boolean).length >= 3;
 
         const pads = Object.keys(data).filter(k => /jump-pad/i.test(k)).flatMap(k => data[k])
-            .filter(p => Math.abs(p.x - sp.x) <= 3 && Math.abs(p.z - sp.z) <= 3 && p.y < sp.y && sp.y - p.y <= 16)
+            // Within 6 blocks: Hard's tube (pad 6,6,7) is 5 from its spatula. Nearest
+            // pad that actually forms a tube wins, so Easy/Medium are unaffected.
+            .filter(p => Math.abs(p.x - sp.x) <= 6 && Math.abs(p.z - sp.z) <= 6 && p.y < sp.y && sp.y - p.y <= 16)
             .sort((a, b) => Math.hypot(a.x - sp.x, a.y - sp.y, a.z - sp.z) - Math.hypot(b.x - sp.x, b.y - sp.y, b.z - sp.z));
 
         for (const pad of pads) {
